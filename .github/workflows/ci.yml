@@ -1,0 +1,173 @@
+# ============================================================
+# CI/CD Pipeline — DevSecOps Demo
+# GitHub Username: yasir239
+# ============================================================
+#
+# هذا الـ pipeline يعمل تلقائياً عند كل push أو pull request
+# على الـ branch الرئيسي (main)
+#
+# ترتيب الـ jobs:
+#   test → sonarcloud ─┐
+#                       ├→ docker (build → trivy → push) → deploy
+#   test ──────────────┘
+# ============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # ════════════════════════════════════════════════════════
+  # JOB 1: Run Tests
+  # ════════════════════════════════════════════════════════
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    # ubuntu-latest = GitHub يوفر لك virtual machine مجانية تعمل Linux
+
+    steps:
+      # الخطوة 1: نسخ كود المشروع إلى الـ runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # الخطوة 2: تثبيت Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # الخطوة 3: تثبيت المكتبات من requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # الخطوة 4: تشغيل الـ tests وإنتاج تقرير coverage
+      # --cov=. = احسب coverage لكل الكود
+      # --cov-report=xml = اصنع coverage.xml لـ SonarCloud
+      # --cov-report=term = اعرض النتائج في الـ terminal أيضاً
+      - name: Run tests with pytest
+        run: pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+
+      # الخطوة 5: احفظ ملف coverage.xml ليستخدمه SonarCloud لاحقاً
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ════════════════════════════════════════════════════════
+  # JOB 2: SonarCloud SAST Analysis
+  # ════════════════════════════════════════════════════════
+  sonarcloud:
+    name: 🔍 SonarCloud Analysis
+    runs-on: ubuntu-latest
+    needs: test
+    # needs: test = لا يبدأ هذا الـ job إلا بعد نجاح job الـ test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 مهم لـ SonarCloud ليرى تاريخ الـ commits كاملاً
+          fetch-depth: 0
+
+      # نحمّل ملف coverage الذي أنتجه الـ test job
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      # نشغّل SonarCloud Scanner
+      # GITHUB_TOKEN: تلقائي من GitHub، يتيح لـ SonarCloud قراءة الـ repo
+      # SONAR_TOKEN: سنضيفه يدوياً كـ Secret في الخطوات التالية
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ════════════════════════════════════════════════════════
+  # JOB 3: Docker Build + Trivy Scan + Push to GHCR
+  # ════════════════════════════════════════════════════════
+  docker:
+    name: 🐳 Docker Build, Scan & Push
+    runs-on: ubuntu-latest
+    needs: test
+    # permissions مطلوبة لرفع الـ image إلى GHCR
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # تسجيل الدخول إلى GitHub Container Registry
+      # github.actor = اسم المستخدم الذي دفع الـ code (yasir239)
+      # GITHUB_TOKEN = تلقائي، يتيح الـ push إلى GHCR بدون أي إعداد إضافي
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # بناء الـ Docker image
+      # -t = tag (اسم الصورة)
+      # الصيغة: ghcr.io/{username}/{repo}:{tag}
+      - name: Build Docker image
+        run: |
+          docker build -t ghcr.io/yasir239/devsecops-demo:latest \
+                       -t ghcr.io/yasir239/devsecops-demo:${{ github.sha }} .
+
+      # فحص الـ image بـ Trivy للثغرات الأمنية
+      # exit-code: '0' = لا نوقف الـ pipeline عند وجود ثغرات (للتعلم)
+      # في production نغيرها إلى '1' لإيقاف الـ pipeline عند ثغرات CRITICAL
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/yasir239/devsecops-demo:latest
+          format: table
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # رفع الـ image إلى GHCR
+      # يُنفَّذ فقط عند push على main (ليس عند pull_request)
+      - name: Push Docker image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push ghcr.io/yasir239/devsecops-demo:latest
+          docker push ghcr.io/yasir239/devsecops-demo:${{ github.sha }}
+
+  # ════════════════════════════════════════════════════════
+  # JOB 4: Deploy
+  # ════════════════════════════════════════════════════════
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deployment instructions
+        run: |
+          echo "════════════════════════════════════════"
+          echo "✅ Pipeline completed successfully!"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "🐳 Docker image is available at:"
+          echo "   ghcr.io/yasir239/devsecops-demo:latest"
+          echo "   ghcr.io/yasir239/devsecops-demo:${{ github.sha }}"
+          echo ""
+          echo "🚀 To deploy locally, run:"
+          echo "   docker pull ghcr.io/yasir239/devsecops-demo:latest"
+          echo "   docker run -d -p 5000:5000 --name devsecops-demo \\"
+          echo "     ghcr.io/yasir239/devsecops-demo:latest"
+          echo ""
+          echo "🌐 Then visit: http://localhost:5000"
+          echo "════════════════════════════════════════"
