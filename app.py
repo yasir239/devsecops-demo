@@ -1,12 +1,11 @@
 from flask import Flask, jsonify
 
-# إنشاء instance من Flask
 app = Flask(__name__)
 
 
 @app.route("/")
 def hello():
-    """Endpoint رئيسي - يرجع رسالة ترحيب."""
+    """Main endpoint that returns a welcome message."""
     return jsonify({
         "message": "Hello, DevSecOps!",
         "status": "running"
@@ -16,8 +15,7 @@ def hello():
 @app.route("/health")
 def health():
     """
-    Health check endpoint.
-    يُستخدم في DevOps للتحقق أن التطبيق يعمل بشكل صحيح.
+    Health check endpoint used to verify that the application is running correctly.
     """
     return jsonify({
         "status": "healthy"
@@ -25,5 +23,4 @@ def health():
 
 
 if __name__ == "__main__":
-    # host="0.0.0.0" مهم داخل Docker ليستقبل الطلبات من خارج الـ container
     app.run(host="0.0.0.0", port=5000, debug=False)
